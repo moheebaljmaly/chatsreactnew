@@ -83,13 +83,48 @@ export default function ChatsScreen() {
   };
 
   // --- تفعيل بدء المحادثات ---
-  // هذه الدالة تبحث عن مستخدم، وإذا تم العثور عليه، تنشئ غرفة محادثة حقيقية.
+  // هذه الدالة تبحث عن مستخدم، وإذا تم العثور عليه، تنشئ غرفة محادثة حقيقية أو تفتح الموجودة.
   const startNewChatWithUser = async (otherUser: any) => {
     if (!user) return;
     setSearchingUser(true);
     
     try {
-      // 1. إنشاء غرفة محادثة جديدة
+      // --- تحسين: التحقق من وجود غرفة محادثة سابقة ---
+      // 1. جلب غرف المحادثة التي يشارك فيها المستخدم الحالي
+      const { data: userRooms, error: userRoomsError } = await supabase
+        .from('chat_participants')
+        .select('chat_room_id')
+        .eq('user_id', user.id);
+
+      if (userRoomsError) throw userRoomsError;
+
+      const userRoomIds = userRooms.map(r => r.chat_room_id);
+
+      if (userRoomIds.length > 0) {
+        // 2. البحث عن غرفة مشتركة مع المستخدم الآخر
+        const { data: existingRoom, error: existingRoomError } = await supabase
+          .from('chat_participants')
+          .select('chat_room_id')
+          .in('chat_room_id', userRoomIds)
+          .eq('user_id', otherUser.id)
+          .limit(1)
+          .single();
+        
+        if (existingRoomError && existingRoomError.code !== 'PGRST116') { // PGRST116 = no rows found
+          throw existingRoomError;
+        }
+
+        if (existingRoom) {
+          // 3. إذا وجدت غرفة، ننتقل إليها مباشرة
+          setShowNewChatModal(false);
+          setNewChatUserId('');
+          router.push(`/chat/${existingRoom.chat_room_id}`);
+          setSearchingUser(false);
+          return;
+        }
+      }
+
+      // 4. إذا لم توجد غرفة، نقوم بإنشاء واحدة جديدة
       const { data: newRoom, error: roomError } = await supabase
         .from('chat_rooms')
         .insert({})
@@ -98,7 +133,7 @@ export default function ChatsScreen() {
       
       if (roomError) throw roomError;
 
-      // 2. إضافة المشاركين (أنت والمستخدم الآخر) إلى الغرفة
+      // 5. إضافة المشاركين (أنت والمستخدم الآخر) إلى الغرفة
       const { error: participantsError } = await supabase
         .from('chat_participants')
         .insert([
@@ -108,7 +143,7 @@ export default function ChatsScreen() {
 
       if (participantsError) throw participantsError;
 
-      // 3. إغلاق المودال والانتقال إلى شاشة المحادثة الجديدة
+      // 6. إغلاق المودال والانتقال إلى شاشة المحادثة الجديدة
       setShowNewChatModal(false);
       setNewChatUserId('');
       router.push(`/chat/${newRoom.id}`);
