@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "EXPO_NO_TELEMETRY=1 npx --yes expo start",
+    "dev": "EXPO_NO_TELEMETRY=1 npx --yes expo start --offline --clear",
     "build:web": "npx --yes expo export --platform web",
     "lint": "npx --yes expo lint"
   },

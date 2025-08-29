@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -16,115 +16,106 @@ import { supabase, findUserByUserId } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { router } from 'expo-router';
 import { validateUserId, formatUserId } from '../../utils/userIdGenerator';
+import { RealtimeChannel } from '@supabase/supabase-js';
 
-interface Chat {
-  id: string;
-  name: string;
-  lastMessage: string;
-  lastMessageTime: string;
-  unreadCount: number;
-  avatar?: string;
+interface ChatRoom {
+  chat_room_id: string;
+  other_user: {
+    id: string;
+    name: string;
+    avatar_url?: string;
+  };
+  last_message: {
+    content: string;
+    created_at: string;
+  } | null;
+  unread_count: number;
 }
 
 export default function ChatsScreen() {
   const { user } = useAuth();
-  const [chats, setChats] = useState<Chat[]>([]);
+  const [chats, setChats] = useState<ChatRoom[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatUserId, setNewChatUserId] = useState('');
   const [searchingUser, setSearchingUser] = useState(false);
 
-  useEffect(() => {
-    // --- رسالة توضيحية ---
-    // في هذا الإصدار، قائمة المحادثات هي للعرض فقط.
-    // المحادثات الحقيقية تبدأ من خلال زر "محادثة جديدة".
-    loadSampleChats();
-  }, []);
+  const fetchChatRooms = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
 
-  const loadSampleChats = async () => {
     try {
-      const sampleChats: Chat[] = [
-        {
-          id: '1',
-          name: 'أحمد محمد',
-          lastMessage: 'مرحباً، كيف حالك؟',
-          lastMessageTime: '10:30',
-          unreadCount: 2,
-        },
-        {
-          id: '2',
-          name: 'فاطمة أحمد',
-          lastMessage: 'شكراً لك على المساعدة',
-          lastMessageTime: 'أمس',
-          unreadCount: 0,
-        },
-      ];
-      setChats(sampleChats);
+      const { data, error } = await supabase.rpc('get_chat_rooms_for_user', {
+        p_user_id: user.id,
+      });
+
+      if (error) {
+        throw error;
+      }
+      
+      setChats(data as ChatRoom[]);
+
     } catch (error) {
-      console.error('Error loading chats:', error);
+      console.error('Error loading chat rooms:', error);
+      Alert.alert('خطأ', 'لم نتمكن من تحميل المحادثات.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
+
+  useEffect(() => {
+    fetchChatRooms();
+
+    const chatUpdateChannel: RealtimeChannel = supabase
+      .channel(`public:chat_rooms`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chat_rooms' },
+        (payload) => {
+          // A new message was inserted, so we refetch all rooms to get the new order and last message
+          fetchChatRooms();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(chatUpdateChannel);
+    };
+  }, [user, fetchChatRooms]);
 
   const filteredChats = chats.filter(chat =>
-    chat.name.toLowerCase().includes(searchQuery.toLowerCase())
+    chat.other_user.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleChatPress = (chat: Chat) => {
-    // بما أن هذه بيانات وهمية، سنعرض رسالة توضيحية
-    Alert.alert('ميزة تجريبية', 'هذه محادثة وهمية للعرض. يمكنك بدء محادثة حقيقية من خلال زر "محادثة جديدة".');
-    // router.push(`/chat/${chat.id}`);
+  const handleChatPress = (chat: ChatRoom) => {
+    router.push(`/chat/${chat.chat_room_id}`);
   };
 
   const handleNewChat = () => {
     setShowNewChatModal(true);
   };
 
-  // --- تفعيل بدء المحادثات ---
-  // هذه الدالة تبحث عن مستخدم، وإذا تم العثور عليه، تنشئ غرفة محادثة حقيقية أو تفتح الموجودة.
   const startNewChatWithUser = async (otherUser: any) => {
     if (!user) return;
     setSearchingUser(true);
     
     try {
-      // --- تحسين: التحقق من وجود غرفة محادثة سابقة ---
-      // 1. جلب غرف المحادثة التي يشارك فيها المستخدم الحالي
-      const { data: userRooms, error: userRoomsError } = await supabase
-        .from('chat_participants')
-        .select('chat_room_id')
-        .eq('user_id', user.id);
+      const { data: existingRoom, error: existingRoomError } = await supabase.rpc('find_existing_chat_room', {
+        user1_id: user.id,
+        user2_id: otherUser.id
+      });
 
-      if (userRoomsError) throw userRoomsError;
+      if (existingRoomError) throw existingRoomError;
 
-      const userRoomIds = userRooms.map(r => r.chat_room_id);
-
-      if (userRoomIds.length > 0) {
-        // 2. البحث عن غرفة مشتركة مع المستخدم الآخر
-        const { data: existingRoom, error: existingRoomError } = await supabase
-          .from('chat_participants')
-          .select('chat_room_id')
-          .in('chat_room_id', userRoomIds)
-          .eq('user_id', otherUser.id)
-          .limit(1)
-          .single();
-        
-        if (existingRoomError && existingRoomError.code !== 'PGRST116') { // PGRST116 = no rows found
-          throw existingRoomError;
-        }
-
-        if (existingRoom) {
-          // 3. إذا وجدت غرفة، ننتقل إليها مباشرة
-          setShowNewChatModal(false);
-          setNewChatUserId('');
-          router.push(`/chat/${existingRoom.chat_room_id}`);
-          setSearchingUser(false);
-          return;
-        }
+      if (existingRoom) {
+        setShowNewChatModal(false);
+        setNewChatUserId('');
+        router.push(`/chat/${existingRoom}`);
+        setSearchingUser(false);
+        return;
       }
 
-      // 4. إذا لم توجد غرفة، نقوم بإنشاء واحدة جديدة
       const { data: newRoom, error: roomError } = await supabase
         .from('chat_rooms')
         .insert({})
@@ -133,7 +124,6 @@ export default function ChatsScreen() {
       
       if (roomError) throw roomError;
 
-      // 5. إضافة المشاركين (أنت والمستخدم الآخر) إلى الغرفة
       const { error: participantsError } = await supabase
         .from('chat_participants')
         .insert([
@@ -143,7 +133,6 @@ export default function ChatsScreen() {
 
       if (participantsError) throw participantsError;
 
-      // 6. إغلاق المودال والانتقال إلى شاشة المحادثة الجديدة
       setShowNewChatModal(false);
       setNewChatUserId('');
       router.push(`/chat/${newRoom.id}`);
@@ -175,6 +164,11 @@ export default function ChatsScreen() {
       const userProfile = await findUserByUserId(cleanUserId);
       
       if (userProfile) {
+        if (userProfile.id === user?.id) {
+          Alert.alert('لا يمكن', 'لا يمكنك بدء محادثة مع نفسك.');
+          setSearchingUser(false);
+          return;
+        }
         Alert.alert(
           'تم العثور على المستخدم',
           `الاسم: ${userProfile.name}\nالمعرف: ${formatUserId(userProfile.user_id)}`,
@@ -197,20 +191,24 @@ export default function ChatsScreen() {
     }
   };
 
-  const renderChatItem = ({ item }: { item: Chat }) => (
+  const renderChatItem = ({ item }: { item: ChatRoom }) => (
     <TouchableOpacity style={styles.chatItem} onPress={() => handleChatPress(item)}>
       <View style={styles.chatInfo}>
         <View style={styles.chatHeader}>
-          <Text style={styles.chatName}>{item.name}</Text>
-          <Text style={styles.chatTime}>{item.lastMessageTime}</Text>
+          <Text style={styles.chatName}>{item.other_user.name}</Text>
+          {item.last_message?.created_at && (
+            <Text style={styles.chatTime}>
+              {new Date(item.last_message.created_at).toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          )}
         </View>
         <View style={styles.chatMessageRow}>
           <Text style={styles.chatMessage} numberOfLines={1}>
-            {item.lastMessage}
+            {item.last_message?.content || 'لا توجد رسائل بعد'}
           </Text>
-          {item.unreadCount > 0 && (
+          {item.unread_count > 0 && (
             <View style={styles.unreadBadge}>
-              <Text style={styles.unreadCount}>{item.unreadCount}</Text>
+              <Text style={styles.unreadCount}>{item.unread_count}</Text>
             </View>
           )}
         </View>
@@ -242,32 +240,32 @@ export default function ChatsScreen() {
         />
       </View>
       
-      <View style={styles.infoBox}>
-        <Ionicons name="information-circle-outline" size={20} color="#333" />
-        <Text style={styles.infoText}>
-          قائمة المحادثات هذه للعرض فقط. لبدء محادثة حقيقية، اضغط على زر (+).
-        </Text>
-      </View>
-
-      <FlatList
-        data={filteredChats}
-        keyExtractor={(item) => item.id}
-        renderItem={renderChatItem}
-        style={styles.chatsList}
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Ionicons name="chatbubbles-outline" size={64} color="#ccc" />
-            <Text style={styles.emptyStateText}>لا توجد محادثات بعد</Text>
-            <Text style={styles.emptyStateSubtext}>ابدأ محادثة جديدة باستخدام المعرف الفريد</Text>
-          </View>
-        }
-      />
+      {loading ? (
+        <ActivityIndicator style={{ marginTop: 50 }} size="large" color="#25D366" />
+      ) : (
+        <FlatList
+          data={filteredChats}
+          keyExtractor={(item) => item.chat_room_id}
+          renderItem={renderChatItem}
+          style={styles.chatsList}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="chatbubbles-outline" size={64} color="#ccc" />
+              <Text style={styles.emptyStateText}>لا توجد محادثات بعد</Text>
+              <Text style={styles.emptyStateSubtext}>ابدأ محادثة جديدة باستخدام المعرف الفريد</Text>
+            </View>
+          }
+          refreshing={loading}
+          onRefresh={fetchChatRooms}
+        />
+      )}
 
       <Modal
         visible={showNewChatModal}
         animationType="slide"
         presentationStyle="pageSheet"
+        onRequestClose={() => setShowNewChatModal(false)}
       >
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
@@ -366,27 +364,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#333',
   },
-  infoBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#e6f7ff',
-    padding: 12,
-    marginHorizontal: 16,
-    marginTop: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#91d5ff',
-  },
-  infoText: {
-    flex: 1,
-    marginLeft: 8,
-    fontSize: 13,
-    color: '#333',
-    textAlign: 'right',
-    lineHeight: 18,
-  },
   chatsList: {
     flex: 1,
+    marginTop: 16,
   },
   chatItem: {
     flexDirection: 'row',
@@ -425,6 +405,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     flex: 1,
+    textAlign: 'right',
   },
   unreadBadge: {
     backgroundColor: '#25D366',
